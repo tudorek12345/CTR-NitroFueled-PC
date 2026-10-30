@@ -12,6 +12,15 @@
 #include "sdl_window.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
+#include "../bbgpu.h"
+
+namespace {
+std::atomic<uint32_t> pc_input_state{BBGPU_PC_INPUT_INACTIVE};
+}
+
+extern "C" uint32_t bbgpu_pc_input_state(void) {
+    return pc_input_state.load(std::memory_order_relaxed);
+}
 
 namespace Frontend {
 
@@ -229,6 +238,7 @@ void WindowSDL::SetIcon(const char* png_path) {
 }
 
 WindowSDL::~WindowSDL() {
+    pc_input_state.store(BBGPU_PC_INPUT_INACTIVE, std::memory_order_relaxed);
     SDL_DestroyWindow(window);
 }
 
@@ -324,6 +334,11 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+    // Sample on the SDL window thread, publish one coherent snapshot for the pad thread.
+    const bool pc_active = is_open && !text_active && !BbOverlay::CapturesInput() &&
+                           (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
+    pc_input_state.store(pc_active ? SDL_GetMouseState(nullptr, nullptr) : BBGPU_PC_INPUT_INACTIVE,
+                         std::memory_order_relaxed);
     UpdateCursor();
     return is_open;
 }

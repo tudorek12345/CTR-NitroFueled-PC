@@ -31,6 +31,10 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+/* Window-thread snapshot: SDL mouse button mask, or BBGPU_PC_INPUT_INACTIVE while unfocused,
+ * typing or in the overlay. Mouse APIs themselves must stay on the window thread. */
+#define BBGPU_PC_INPUT_INACTIVE UINT32_C(0x80000000)
+uint32_t bbgpu_pc_input_state(void);
 /* SacredFire: 1 once after the in-game menu's "Rescan controllers" button (runtime_pad.c restarts
  * SDL's gamepad subsystem and enumerates devices afresh); cleared by the call. */
 int bbgpu_pad_rescan_take(void);

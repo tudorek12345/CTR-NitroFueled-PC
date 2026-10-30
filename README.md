@@ -248,6 +248,25 @@ The keyboard works next to a gamepad: WASD left stick, arrow keys right stick, S
 LShift Circle, E Square, Q Triangle, 1/3 L1/R1, R/F L2/R2, Z/C L3/R3, Enter Options, IJKL
 d-pad; *Controls › Keyboard* rebinds them (`key.<input>=` lines in `bbport.ini`).
 
+**Keyboard/mouse + Xbox split screen.** In *Controls*, press
+*Split screen: keyboard/mouse + controller*, then choose two players in the game's Local Arcade.
+Player 1 uses WASD and the existing keyboard bindings; mouse left accelerates/confirms, right
+brakes/reverses, middle uses an item, and the two side buttons hop/drift. Mouse movement does not
+steer. Player 2 uses the first available SDL gamepad (Xbox USB/Bluetooth controllers supported).
+You can instead choose a specific controller for player 2. The preset saves `port.1=keyboard_mouse`
+and `port.2=auto` to `bbport.ini`; the same choices are in the in-game Controllers tab.
+Player 1 never takes a gamepad in this mode. Mouse/keyboard input is neutral while the game
+window is unfocused, while typing in a dialog, or while the settings overlay is open.
+Players 2–4 join/leave as their assigned controller connects/disconnects. These settings enable
+separate inputs; they do not bypass the game's local multiplayer menu or the 1.21 game requirement.
+
+In *Controls > Keyboard*, **PC racing controls** applies W accelerate, S brake/reverse,
+A/D steer, Space/right mouse hop/drift, Shift/middle mouse drift boost, E/left mouse item,
+Enter confirm, Backspace back, Escape pause, and arrow keys for menus. Hold drift and tap
+the other drift button (Shift) to boost at the right time. Mouse buttons can be reassigned
+on that page (`mouse.<input>=left,right,middle,x1,x2`; empty disables a binding). Controls
+apply on the next launch; Xbox controller bindings remain independent.
+
 **Achievements** (v0.4). The game's trophies unlock as on a PS4: each one is kept in
 `user\trophies\<TITLE_ID>\unlocked.txt` with its date, shows a notice over the game, and the
 platinum comes once all the others are. The launcher's *Achievements* tab shows them with their
@@ -352,6 +371,11 @@ temporal upscalers and motion vectors remain in `gpu/`, off; its libGnm hook cod
 a function table (the table was generated from Bloodborne's executable and is not distributed).
 
 ## Credits and licenses
+
+Recent input/runtime changes are listed in [CHANGELOG.md](CHANGELOG.md). Additional attribution
+and proprietary-component notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+The optional [Xbox prompt tool and investigation notes](docs/sacredfire/18-pc-split-screen.md)
+cover local font installation and the remaining renderer crash.
 
 SacredFire is licensed under the **GNU GPL v2 or later** ([LICENSE](LICENSE)): it contains code
 from bbport and shadPS4 (both GPL-2.0-or-later). Third-party components keep their licenses:

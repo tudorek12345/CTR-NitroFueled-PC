@@ -874,12 +874,20 @@ void Menu() {
                 current = s.ports[size_t(p)].data();
             }
             std::string label = current.empty() ? (p == 0 ? BbSettings::MenuText("(first / last used)", "(первый / последний использованный)") : BbSettings::MenuText("(none)", "(нет)")) : current;
+            if (p == 0 && current == "keyboard_mouse") label = BbSettings::Label("Keyboard and mouse only");
+            if (p > 0 && current == "auto") label = BbSettings::Label("Automatic: first available controller");
             for (const auto& [guid, text] : pads) {
                 if (guid == current) label = text;
             }
             char title[32];
             std::snprintf(title, sizeof title, "%s %d", BbSettings::MenuText("Port", "Порт"), p + 1);
             if (ImGui::BeginCombo(title, label.c_str())) {
+                const char* special = p == 0 ? "keyboard_mouse" : "auto";
+                if (ImGui::Selectable(p == 0 ? BbSettings::Label("Keyboard and mouse only") : BbSettings::Label("Automatic: first available controller"), current == special)) {
+                    std::lock_guard lk{BbSettings::PortsMutex()};
+                    std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "%s", special);
+                    changed = true;
+                }
                 if (ImGui::Selectable(p == 0 ? BbSettings::MenuText("(first / last used)", "(первый / последний использованный)") : BbSettings::MenuText("(none)", "(нет)"), current.empty())) {
                     std::lock_guard lk{BbSettings::PortsMutex()};
                     s.ports[size_t(p)][0] = 0;
@@ -900,6 +908,7 @@ void Menu() {
         }
         ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected",
                                                  "Порты 2-4 входят как Player 2-4, пока подключён их геймпад"));
+        ImGui::TextWrapped("%s", BbSettings::Label("Keyboard/mouse split screen: Port 1 = Keyboard and mouse only, Port 2 = Automatic or your controller. Configure PC racing controls and mouse buttons in the launcher's Keyboard page; restart to apply bindings."));
     }
 
     // SacredFire: the Steam Deck sometimes shows a controller connected after launch only to a

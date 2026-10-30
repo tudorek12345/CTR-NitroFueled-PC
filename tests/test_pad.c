@@ -4,6 +4,10 @@
 #include "../src/runtime_pad.c"
 
 static int capture;
+static uint32_t mouse_state;
+static int user_login[PORTS];
+uint32_t bbgpu_pc_input_state(void) { return mouse_state; }
+void runtime_services_user_change(int user, int login) { user_login[user-1]=login; }
 int bbgpu_overlay_captures_input(void) { return capture; }
 int bbgpu_pad_rescan_take(void) { return 0; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
@@ -11,30 +15,54 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
     return 0;
 }
 
+static int temp_file(char *path, size_t size, const char *name) {
+#ifdef _WIN32
+    const char *temp=getenv("TEMP");
+    assert(temp);
+    snprintf(path,size,"%s/%s-XXXXXX",temp,name);
+    assert(_mktemp_s(path,size)==0);
+    return _open(path,_O_CREAT|_O_EXCL|_O_RDWR|_O_BINARY,_S_IREAD|_S_IWRITE);
+#else
+    snprintf(path,size,"/tmp/%s-XXXXXX",name);
+    return mkstemp(path);
+#endif
+}
+
+static void test_env(const char *name, const char *value) {
+#ifdef _WIN32
+    assert(_putenv_s(name,value)==0);
+#else
+    assert(setenv(name,value,1)==0);
+#endif
+}
+
 static void inject(const char *path, const char *tokens) {
     FILE *f=fopen(path,"w");
     assert(f);
     fputs(tokens,f);
     fclose(f);
-    usleep(25000);
+    SDL_Delay(25);
 }
 
 int main(void) {
-    char path[]="/tmp/bbport-pad-test-XXXXXX";
-    int fd=mkstemp(path);
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR); /* assertions must reach the build log, not a GUI dialog */
+#endif
+    char path[1024];
+    int fd=temp_file(path,sizeof path,"bbport-pad-test");
     assert(fd>=0);
     close(fd);
-    setenv("BB_PAD_FILE",path,1);
+    test_env("BB_PAD_FILE",path);
     /* bbport.ini controls: buttons moved, a trigger as a button and a button as a trigger. */
-    char config[]="/tmp/bbport-pad-config-XXXXXX";
-    int config_fd=mkstemp(config);
+    char config[1024];
+    int config_fd=temp_file(config,sizeof config,"bbport-pad-config");
     assert(config_fd>=0);
     const char controls[]="upscaler=fsr3\npad.cross=b\npad.circle=a\npad.r2=rightshoulder\n"
                           "pad.r1=righttrigger\nkey.cross=X, Space\npad.bogus=a\n";
     assert(write(config_fd,controls,sizeof(controls)-1)==(ssize_t)(sizeof(controls)-1));
     close(config_fd);
-    setenv("BB_CONFIG",config,1);
-    setenv("SDL_VIDEODRIVER","dummy",1);
+    test_env("BB_CONFIG",config);
+    test_env("SDL_VIDEODRIVER","dummy");
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
     assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD));
@@ -94,9 +122,86 @@ int main(void) {
     assert(data.buttons==(BTN_CROSS|BTN_R2|BTN_R1) && data.r2==255);
     assert(bindings[IN_CROSS].key_count==2 && bindings[IN_CROSS].keys[0]==SDL_SCANCODE_X &&
            bindings[IN_CROSS].keys[1]==SDL_SCANCODE_SPACE);
+
+    /* Switch a controller already active on P1 to P2 without restarting. */
+    FILE *split=fopen(config,"w");
+    assert(split);
+    char guid[33];
+    SDL_GUIDToString(SDL_GetGamepadGUIDForID(id),guid,sizeof guid);
+    fprintf(split,"port.1=keyboard_mouse\nport.2=%s\n",guid);
+    fclose(split);
+    config_checked=0;
+    assert(pad_read_state(1,&data)==0);
+    assert(gamepad==NULL && data.buttons==0 && data.left_x==128);
+    update_port_presence();
+    assert(user_login[1] && ports[1].pad && runtime_pad_user_present(2));
+    assert(pad_open(2,0,0,NULL)==2);
+    SDL_UpdateGamepads();
+    PadData second;
+    assert(pad_read_state(2,&second)==0);
+    assert(second.buttons==(BTN_CROSS|BTN_R2|BTN_R1) && second.r2==255);
+
+    /* Mouse aliases affect only P1 and never change steering, even while P2 holds inputs. */
+    mouse_state=SDL_BUTTON_LMASK|SDL_BUTTON_RMASK|SDL_BUTTON_MMASK|SDL_BUTTON_X1MASK|SDL_BUTTON_X2MASK;
+    assert(pad_read_state(1,&data)==0);
+    assert(data.buttons==(BTN_CROSS|BTN_SQUARE|BTN_CIRCLE|BTN_L1|BTN_R1));
+    assert(data.left_x==128 && data.left_y==128 && data.right_x==128 && data.right_y==128);
+    assert(pad_read_state(2,&second)==0 && second.buttons==(BTN_CROSS|BTN_R2|BTN_R1));
+    bool keys[SDL_SCANCODE_COUNT]={false};
+    keys[SDL_SCANCODE_A]=true;
+    apply_keyboard(&data,keys);
+    assert(data.left_x==0 && (data.buttons & BTN_CROSS));
+    mouse_state=0;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    mouse_state=BBGPU_PC_INPUT_INACTIVE|SDL_BUTTON_LMASK;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.left_x==128);
+    mouse_state=SDL_BUTTON_LMASK;
+    capture=1;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    assert(pad_read_state(2,&second)==0 && second.buttons==0);
+    capture=0; mouse_state=0;
+    /* PC racing preset: W gas, S brake/reverse, independent drift/boost, remapped mouse. */
+    split=fopen(config,"a");
+    assert(split);
+    fputs("key.cross=W,Return\nkey.square=S\nkey.circle=E,Backspace\nkey.r1=Space\nkey.l1=Left Shift\n"
+          "key.move_up=\nkey.move_down=S\nmouse.cross=\nmouse.square=\nmouse.circle=left\n"
+          "mouse.r1=right\nmouse.l1=middle\nmouse.r2=x1\nmouse.l2=x2\n"
+          "pad.cross=b\npad.circle=a\npad.r2=rightshoulder\npad.r1=righttrigger\n",split);
+    fclose(split);
+    load_bindings();
+    mouse_state=SDL_BUTTON_LMASK|SDL_BUTTON_RMASK;
+    assert(pad_read_state(1,&data)==0 && data.buttons==(BTN_CIRCLE|BTN_R1));
+    memset(keys,0,sizeof keys);
+    keys[SDL_SCANCODE_W]=keys[SDL_SCANCODE_D]=keys[SDL_SCANCODE_LSHIFT]=true;
+    apply_keyboard(&data,keys);
+    assert(data.buttons==(BTN_CIRCLE|BTN_R1|BTN_L1|BTN_CROSS));
+    assert(data.left_x==255 && data.left_y==128);
+    assert(pad_read_state(2,&second)==0 && second.buttons==(BTN_CROSS|BTN_R2|BTN_R1));
+    mouse_state=SDL_BUTTON_X1MASK;
+    assert(pad_read_state(1,&data)==0 && data.buttons==BTN_R2 && data.r2==255);
+    memset(keys,0,sizeof keys);
+    keys[SDL_SCANCODE_S]=true;
+    apply_keyboard(&data,keys);
+    assert((data.buttons & BTN_SQUARE) && data.left_y==255);
+    mouse_state=0;
+    SDL_CloseGamepad(ports[1].pad); ports[1].pad=NULL;
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
+    assert(SDL_DetachVirtualJoystick(id));
+    update_port_presence();
+    assert(!user_login[1] && !runtime_pad_user_present(2));
+    /* An automatic port reconnects to an available controller without stealing P1. */
+    split=fopen(config,"w");
+    assert(split);
+    fputs("port.1=keyboard_mouse\nport.2=auto\n",split);
+    fclose(split);
+    config_checked=0;
+    id=SDL_AttachVirtualJoystick(&desc);
+    assert(id && current_gamepad()==NULL);
+    update_port_presence();
+    assert(user_login[1] && ports[1].pad);
+    SDL_CloseGamepad(ports[1].pad); ports[1].pad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
@@ -122,5 +227,5 @@ int main(void) {
         assert(clone.have_center && clone.center[0]==16380 && clone.base[0]==16380);
         assert(stick_axis(&clone,0,16380)==128 && stick_axis(&clone,0,32760)==255 && stick_axis(&clone,0,0)==0);
     }
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, stick calibration");
+    puts("PASS: pad ABI, touch, overlay capture, controls, calibration, keyboard/mouse P1, isolated P2, live reassignment, disconnect/reconnect");
 }

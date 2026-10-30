@@ -265,6 +265,16 @@ if (WIN32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(mutex-lifetime-test EXCLUDE_FROM_ALL ../tests/test_mutex_lifetime.c)
+target_compile_options(mutex-lifetime-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(mutex-lifetime-test PRIVATE ..)
+target_link_libraries(mutex-lifetime-test PRIVATE -pthread)
+
+add_executable(pad-input-test EXCLUDE_FROM_ALL ../tests/test_pad.c)
+target_compile_options(pad-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(pad-input-test PRIVATE ..)
+target_link_libraries(pad-input-test PRIVATE PkgConfig::SDL3 -pthread)
+
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)

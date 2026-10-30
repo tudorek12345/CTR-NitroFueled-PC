@@ -69,6 +69,16 @@ A test build with `-DLAUNCHER_SELFTEST` runs the file operations from the comman
 
 ## Run
 
+Keyboard/mouse split-screen regression test (SDL virtual controller, no game files needed):
+`ninja -C out/gpu pad-input-test`, then run `out/gpu/pad-input-test.exe` with CLANG64's `bin`
+on PATH. It checks mouse-button aliases, WASD steering, separate player inputs, focus/menu
+suppression, live reassignment with a held trigger, and controller disconnect/reconnect.
+
+`ninja -C out/gpu mutex-lifetime-test`, then `out/gpu/mutex-lifetime-test.exe`, checks concurrent
+native mutex destruction and condition-wait lifetime without game files. The investigation,
+optional Xbox prompt tool, and known renderer crash are documented in
+[docs/sacredfire/18-pc-split-screen.md](../../docs/sacredfire/18-pc-split-screen.md).
+
 `run.py` is the Windows `run.sh` (same variables; MSYS2's Python or a python.org Python):
 
 ```bat

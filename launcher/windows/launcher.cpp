@@ -1912,6 +1912,11 @@ void SettingsTab() {
     GameFlag("async_pipelines", T("Compilar shaders en segundo plano (experimental)", "Compile shaders in the background (experimental)"), false,
              T("Menos tirones la primera vez que aparece un efecto; a veces un efecto tarda un fotograma en verse.",
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
+    GameFlag("gpu_safe_mode", T("Sincronización GPU conservadora (experimental)", "Conservative GPU synchronization (experimental)"), false,
+             T("Para investigar fallos: desactiva el pipeline de dibujado y la preparación especulativa, "
+               "y espera al final del trabajo GPU antes de liberar sus señales. Puede reducir los FPS o causar fallos. Reinicia el juego.",
+               "For crash investigation: disables the draw pipeline and speculative preparation, and waits for GPU "
+               "completion before releasing fences. May reduce FPS or cause faults. Restart the game."));
 
     Section(T("Pantalla", "Display"));
     {
@@ -2710,14 +2715,88 @@ std::vector<std::string> SplitKeys(const std::string& value) {
     return keys;
 }
 
+void ApplyPcRacingControls() {
+    App& a=g_app;
+    const std::pair<const char*,const char*> keys[]={
+        {"cross","W,Return"},{"square","S"},{"circle","E,Backspace"},{"triangle","Q"},
+        {"r1","Space"},{"l1","Left Shift"},{"r2","C"},{"l2","R"},{"options","Escape"},
+        {"touchpad","Tab"},{"touchpad_right",""},{"r3",""},{"move_up",""},{"move_down","S"},
+        {"move_left","A"},{"move_right","D"},{"up","Up"},{"down","Down"},
+        {"left","Left"},{"right","Right"},{"look_up","I"},{"look_down","K"},
+        {"look_left","J"},{"look_right","L"}
+    };
+    for (const auto& [key,value]:keys) a.game.Set(std::string("key.")+key,value);
+    for (const auto& in:kKeyInputs) {
+        if (std::string(in.id).rfind("move_",0)!=0 && std::string(in.id).rfind("look_",0)!=0)
+            a.game.Set(std::string("mouse.")+in.id,"");
+    }
+    a.game.Set("mouse.circle","left");
+    a.game.Set("mouse.r1","right");
+    a.game.Set("mouse.l1","middle");
+    a.game.Set("mouse.r2","x1");
+    a.game.Set("mouse.l2","x2");
+    a.game.Set("port.1","keyboard_mouse");
+    a.launcher.Set("gamepad","");
+    a.launcher.Set("gamepad_name","");
+    SaveGameIni(); SaveLauncher();
+}
+
+const char* PcActionLabel(const KeyInput& in) {
+    const std::string id=in.id;
+    if (id=="cross") return T("Acelerar / confirmar (A)","Accelerate / confirm (A)");
+    if (id=="square") return T("Frenar (X)","Brake (X)");
+    if (id=="circle") return T("Objeto / volver (B)","Item / back (B)");
+    if (id=="triangle") return T("Indicador turbo / mapa (Y)","Turbo gauge / map (Y)");
+    if (id=="r1") return T("Saltar / derrapar (RB)","Hop / drift (RB)");
+    if (id=="l1") return T("Turbo durante derrape (LB)","Drift boost (LB)");
+    if (id=="r2") return T("Mirar atrás (RT)","Look back (RT)");
+    if (id=="l2") return T("Distancia de cámara (LT)","Camera distance (LT)");
+    return T(in.es,in.en);
+}
+
 void KeyboardTab() {
     App& a = g_app;
+    if (ImGui::Button(T("Controles PC de carreras", "PC racing controls"))) ApplyPcRacingControls();
+    ImGui::TextWrapped("%s",T("W: acelerar; S: frenar/reversa; A/D: girar; Espacio o ratón derecho: derrapar; "
+                              "Mayús o ratón central: turbo; E o ratón izquierdo: objeto. Flechas: menús; Enter: confirmar; "
+                              "Retroceso: volver; Esc: pausa. Se aplica al reiniciar.",
+                              "W: accelerate; S: brake/reverse; A/D: steer; Space or right mouse: hop/drift; "
+                              "Shift or middle mouse: drift boost; E or left mouse: item. Arrow keys: menus; Enter: confirm; "
+                              "Backspace: back; Esc: pause. Apply on next launch."));
     ImGui::TextWrapped("%s", T("Teclas del jugador 1. El teclado funciona a la vez que el mando. Pulsa \"Cambiar\" y luego la "
                                "tecla; cada acción admite hasta 4 teclas. Se guarda en bbport.ini y vale desde el próximo arranque.",
-                               "Player 1's keys. The keyboard works together with the controller. Press \"Change\", then the key; "
+                               "Player 1's keys. Press \"Change\", then the key; "
                                "each action takes up to 4 keys. Saved in bbport.ini, used from the next start."));
     ImGui::TextColored(kGrey, "%s", T("Insert abre el menú del juego y Esc cancela, por eso no se pueden asignar.",
-                                      "Insert opens the in-game menu and Esc cancels, so they cannot be bound."));
+                                      "Insert opens settings. Esc cancels key capture; the PC preset uses it for pause."));
+    Section(T("Botones del ratón", "Mouse buttons"));
+    ImGui::TextWrapped("%s",T("Solo el jugador 1 en modo teclado y ratón. No cambia los controles del mando.",
+                              "Player 1 in keyboard/mouse mode only. Controller bindings are separate."));
+    const char* mouse_values[]={"","left","right","middle","x1","x2"};
+    const char* mouse_labels[]={"None","Left mouse","Right mouse","Middle mouse","Mouse side 1","Mouse side 2"};
+    if (ImGui::BeginTable("mousebuttons",2,ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        for (const auto& in:kKeyInputs) {
+            const std::string id=in.id;
+            if (id!="cross" && id!="square" && id!="circle" && id!="r1" && id!="l1" && id!="r2" && id!="l2" && id!="options") continue;
+            const std::string key="mouse."+id;
+            const char* fallback=id=="cross" ? "left" : id=="square" ? "right" : id=="circle" ? "middle" :
+                                 id=="l1" ? "x1" : id=="r1" ? "x2" : "";
+            const std::string current=a.game.Get(key,fallback);
+            const char* preview=current.empty() ? "None" : current.c_str();
+            for (int i=0;i<6;++i) if (current==mouse_values[i]) preview=mouse_labels[i];
+            ImGui::PushID(key.c_str());
+            ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextUnformatted(PcActionLabel(in));
+            ImGui::TableNextColumn(); ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##mouse",preview)) {
+                for (int i=0;i<6;++i) if (ImGui::Selectable(mouse_labels[i],current==mouse_values[i])) {
+                    a.game.Set(key,mouse_values[i]); SaveGameIni();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
     const int capturing = g_key_capture;
     if (capturing >= 0) {
         const unsigned got = g_key_captured.exchange(0);
@@ -2760,7 +2839,7 @@ void KeyboardTab() {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(T(in.es, in.en));
+            ImGui::TextUnformatted(PcActionLabel(in));
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
             if (capturing == i) {
@@ -3090,12 +3169,30 @@ void ControllersPage() {
     }
 
     Section(T("Jugadores", "Players"));
+    if (ImGui::Button(T("Pantalla dividida: teclado/ratón + mando", "Split screen: keyboard/mouse + controller"))) {
+        a.game.Set("port.1", "keyboard_mouse");
+        a.game.Set("port.2", "auto");
+        a.launcher.Set("gamepad", "");
+        a.launcher.Set("gamepad_name", "");
+        a.launcher.Set("port_name.1", "");
+        a.launcher.Set("port_name.2", "");
+        SaveGameIni();
+        SaveLauncher();
+    }
+    ImGui::TextWrapped("%s", T("J1: teclado y ratón; configura los controles PC y los botones del ratón en la página Teclado. "
+                              "J2: primer mando disponible, Xbox incluido. El ratón no gira el kart. Selecciona 2 jugadores en Arcade local.",
+                              "P1: keyboard and mouse; use the Keyboard page for the PC racing preset and mouse bindings. "
+                              "P2: first available controller, including Xbox. Mouse movement does not steer. Choose 2 players in Local Arcade."));
     for (int n = 1; n <= 4; ++n) {
         ImGui::PushID(n);
         const std::string current = PlayerPad(n);
         std::string preview = n == 1 ? T("Automático: el último mando que uses", "Automatic: the last controller used")
                                      : T("Nadie", "Nobody");
-        if (!current.empty()) {
+        if (n == 1 && current == "keyboard_mouse") {
+            preview = T("Solo teclado y ratón", "Keyboard and mouse only");
+        } else if (n > 1 && current == "auto") {
+            preview = T("Automático: primer mando disponible", "Automatic: first available controller");
+        } else if (!current.empty()) {
             preview = a.launcher.Get("port_name." + std::to_string(n));
             if (preview.empty() && n == 1) preview = a.launcher.Get("gamepad_name");
             if (preview.empty()) preview = current;
@@ -3116,6 +3213,17 @@ void ControllersPage() {
                                          : T("Nadie", "Nobody"),
                                   current.empty()))
                 SetPlayerPad(n, nullptr);
+            if (n == 1 && ImGui::Selectable(T("Solo teclado y ratón", "Keyboard and mouse only"), current == "keyboard_mouse")) {
+                a.game.Set("port.1", "keyboard_mouse");
+                a.launcher.Set("gamepad", "");
+                a.launcher.Set("gamepad_name", "");
+                SaveGameIni(); SaveLauncher();
+            }
+            if (n > 1 && ImGui::Selectable(T("Automático: primer mando disponible", "Automatic: first available controller"), current == "auto")) {
+                a.game.Set("port." + std::to_string(n), "auto");
+                a.launcher.Set("port_name." + std::to_string(n), "");
+                SaveGameIni(); SaveLauncher();
+            }
             for (const auto& p : pads) {
                 ImGui::PushID(int(p.id));
                 const std::string label = display(p) + "  (" + Pads::TypeName(p.type, g_spanish) + ")";
@@ -3126,7 +3234,7 @@ void ControllersPage() {
         }
         if (n == 1)
             HelpMarker(T("El jugador 1 también usa el teclado. En automático juega el mando que toques: coge cualquiera y pulsa un botón.",
-                         "Player 1 also uses the keyboard. On automatic, the controller you touch plays: pick any and press a button."));
+                         "Keyboard and mouse only reserves all controllers for other players. On automatic, keyboard and the last controller used share player 1."));
         if (n == 2)
             HelpMarker(T("Jugadores 2 a 4: pantalla dividida. Entran al juego mientras su mando está conectado. También se cambia "
                          "dentro del juego (Insert › Controllers).",

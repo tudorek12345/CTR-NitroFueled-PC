@@ -71,12 +71,15 @@ _Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout"
 
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized, opened, sdl_ready;
+static int bindings_ready;
+static void load_bindings(void);
 static SDL_Gamepad *gamepad;
 /* SacredFire: ports 2..4 for split screen: the gamepad named in bbport.ini (port.N=), opened while
  * connected; the game sees user N logged in while the port has its gamepad. Port 1 is `gamepad`. */
 #define PORTS 4
 typedef struct { char want[64]; SDL_Gamepad *pad; int opened, present; } Port;
 static Port ports[PORTS]; /* ports[0].want overrides BB_GAMEPAD for port 1 */
+static int keyboard_mouse_only(void) { return !strcmp(ports[0].want,"keyboard_mouse"); }
 static unsigned pad_rescan_attempts; /* misses in a row looking for a bound controller (current_gamepad) */
 static struct timespec config_mtime; static uint64_t config_checked;
 static void load_ports(void) {
@@ -99,6 +102,7 @@ static void load_ports(void) {
             snprintf(ports[p].want,sizeof ports[p].want,"%.63s",fresh[p]);
             if (p && ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
             if (p) printf("Runtime: controller port %d -> %s\n",p+1,fresh[p][0] ? fresh[p] : "(none)");
+            else printf("Runtime: player 1 input -> %s\n",keyboard_mouse_only() ? "keyboard and mouse only" : fresh[p][0] ? fresh[p] : "keyboard and automatic gamepad");
         }
     }
 }
@@ -122,7 +126,12 @@ static void refresh_ports(uint64_t now) {
 /* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). */
 static int is_preferred(SDL_JoystickID id, const char *want);
 static int claimed_by_other_port(SDL_JoystickID id, int except) {
-    for (int p=1;p<PORTS;++p) if (p!=except && ports[p].want[0] && is_preferred(id,ports[p].want)) return 1;
+    for (int p=1;p<PORTS;++p) {
+        if (p==except || !ports[p].want[0]) continue;
+        if (!strcmp(ports[p].want,"auto")) {
+            if (ports[p].pad && SDL_GetGamepadID(ports[p].pad)==id) return 1;
+        } else if (is_preferred(id,ports[p].want)) return 1;
+    }
     return 0;
 }
 /* Per-port stick calibration (the functions follow the axis helpers below). */
@@ -144,7 +153,7 @@ static SDL_Gamepad *port_gamepad(int p) {
     int count=0;
     SDL_JoystickID *ids=SDL_GetGamepads(&count);
     for (int i=0; ids && i<count && !port->pad; ++i) {
-        if (!is_preferred(ids[i],port->want)) continue;
+        if (strcmp(port->want,"auto") && !is_preferred(ids[i],port->want)) continue;
         if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue; /* port 1 has it */
         if (claimed_by_other_port(ids[i],p)) continue;
         port->pad=SDL_OpenGamepad(ids[i]);
@@ -312,12 +321,31 @@ static int gamepad_active(SDL_Gamepad *g) {
  * is taken as soon as it connects); the controller used last takes over (below); called under lock. */
 static SDL_Gamepad *current_gamepad(void) {
     static int on_preferred; static uint64_t last_scan;
+    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     const uint64_t now=now_us();
     refresh_ports(now);
-    const char *want=preferred_gamepad();
+    // A live assignment to another player must release P1's existing handle first.
+    // Keyboard/mouse mode never falls back to, or steals input from, a gamepad.
+    const int pc_only=keyboard_mouse_only();
+    if (gamepad && (pc_only || claimed_by_other_port(SDL_GetGamepadID(gamepad),0))) {
+        SDL_Gamepad *previous=gamepad;
+        const SDL_JoystickID id=SDL_GetGamepadID(previous);
+        gamepad=NULL; on_preferred=0;
+        // Transfer an already-open pad rather than reopening it: SDL can otherwise
+        // recalibrate a held trigger as its new resting position during reassignment.
+        for (int p=1;p<PORTS;++p) {
+            if (ports[p].pad || !ports[p].want[0] || claimed_by_other_port(id,p)) continue;
+            if (strcmp(ports[p].want,"auto") && !is_preferred(id,ports[p].want)) continue;
+            ports[p].pad=previous; cals[p]=cals[0]; previous=NULL;
+            printf("Runtime: active controller transferred to port %d\n",p+1);
+            break;
+        }
+        if (previous) SDL_CloseGamepad(previous);
+    }
+    const char *want=pc_only ? NULL : preferred_gamepad();
     /* SacredFire: in a container SDL gets no hot-plug notification (no udev), and the Steam Deck
      * sometimes shows a controller connected after launch only to a fresh enumeration. While the
      * chosen gamepad is missing, port 1 has no pad at all or a named port 2..4 is unfulfilled, the
@@ -340,7 +368,7 @@ static SDL_Gamepad *current_gamepad(void) {
         last_scan=now;
         int count=0, pick=-1;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        for (int i=0; want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want) && !claimed_by_other_port(ids[i],0)) pick=i;
+        for (int i=0; !pc_only && want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want) && !claimed_by_other_port(ids[i],0)) pick=i;
         if (requested || (((want ? pick<0 : count==0) || port_missing) && rescan_due)) { /* the plain scan found nothing usable */
             last_reinit=now;
             SDL_free(ids); ids=NULL;
@@ -350,7 +378,7 @@ static SDL_Gamepad *current_gamepad(void) {
             ids=SDL_GetGamepads(&count);
             if (requested) printf("Runtime: controllers re-enumerated on request: %d found\n",count);
             else if (reinits++<3) printf("Runtime: %s; devices re-enumerated: %d found\n",want && pick<0 ? "chosen gamepad not seen" : "no gamepad or a port's controller missing",count);
-            for (int i=0; want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want)) pick=i;
+            for (int i=0; !pc_only && want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want) && !claimed_by_other_port(ids[i],0)) pick=i;
             /* Found what was missing: attempts start over; else one more miss, the last one reported. */
             int still_missing=(want ? pick<0 : count==0);
             for (int p=1;p<PORTS && !still_missing;++p) if (ports[p].want[0] && !ports[p].pad) {
@@ -361,7 +389,7 @@ static SDL_Gamepad *current_gamepad(void) {
             else if (++attempts==PAD_RESCAN_ATTEMPTS)
                 printf("Runtime: a bound controller was not found in %d rescans: treated as disconnected (the in-game menu's Rescan controllers tries again)\n",PAD_RESCAN_ATTEMPTS);
         }
-        if (pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i) if (!claimed_by_other_port(ids[i],0)) pick=i;
+        if (!pc_only && pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i) if (!claimed_by_other_port(ids[i],0)) pick=i;
         if (pick>=0 && (!gamepad || SDL_GetGamepadID(gamepad)!=ids[pick])) {
             if (gamepad) SDL_CloseGamepad(gamepad);
             gamepad=SDL_OpenGamepad(ids[pick]);
@@ -379,7 +407,7 @@ static SDL_Gamepad *current_gamepad(void) {
      * kept open and polled ten times a second; one that produces input while the active one is idle
      * takes over (and ends the search for the BB_GAMEPAD choice). Pick up any pad and press a button. */
     static uint64_t last_switch_scan;
-    if (now-last_switch_scan>100000) {
+    if (!pc_only && now-last_switch_scan>100000) {
         last_switch_scan=now;
         static SDL_Gamepad *others[8]; static int other_count;
         int count=0;
@@ -400,7 +428,7 @@ static SDL_Gamepad *current_gamepad(void) {
         SDL_free(ids);
         if (gamepad && !gamepad_active(gamepad)) {
             for (int j=0;j<other_count;++j) {
-                if (!others[j] || !gamepad_active(others[j])) continue;
+                if (!others[j] || claimed_by_other_port(SDL_GetGamepadID(others[j]),0) || !gamepad_active(others[j])) continue;
                 SDL_Gamepad *previous=gamepad;
                 gamepad=others[j]; others[j]=previous; on_preferred=1;
                 printf("Runtime: gamepad switched to %s (it was used)\n",SDL_GetGamepadName(gamepad));
@@ -438,9 +466,8 @@ static const uint32_t input_buttons[IN_COUNT]={
 };
 #define MAX_BIND 4
 enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* triggers as buttons */
-typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
+typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; uint32_t mouse; } Binding;
 static Binding bindings[IN_COUNT];
-static int bindings_ready;
 
 static void bind_defaults(void) {
     static const struct { int input; SDL_Scancode key; } keys[]={
@@ -466,6 +493,11 @@ static void bind_defaults(void) {
         {IN_LEFT,SDL_GAMEPAD_BUTTON_DPAD_LEFT}, {IN_RIGHT,SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
     };
     memset(bindings,0,sizeof bindings);
+    bindings[IN_CROSS].mouse=SDL_BUTTON_LMASK;
+    bindings[IN_SQUARE].mouse=SDL_BUTTON_RMASK;
+    bindings[IN_CIRCLE].mouse=SDL_BUTTON_MMASK;
+    bindings[IN_L1].mouse=SDL_BUTTON_X1MASK;
+    bindings[IN_R1].mouse=SDL_BUTTON_X2MASK;
     for (size_t i=0;i<sizeof(keys)/sizeof(*keys);++i) {
         Binding *b=&bindings[keys[i].input]; b->keys[b->key_count++]=keys[i].key;
     }
@@ -479,7 +511,12 @@ static int pad_button_from_name(const char *name) {
     const SDL_GamepadButton b=SDL_GetGamepadButtonFromString(name);
     return b==SDL_GAMEPAD_BUTTON_INVALID ? -1 : (int)b;
 }
-/* key.<input>= / pad.<input>= lines of the settings file. */
+static uint32_t mouse_button_from_name(const char *name) {
+    static const char *const names[]={"left","middle","right","x1","x2"};
+    for (int i=0;i<5;++i) if (!SDL_strcasecmp(name,names[i])) return SDL_BUTTON_MASK(i+1);
+    return 0;
+}
+/* key.<input>= / pad.<input>= / mouse.<input>= lines of the settings file. */
 static void load_bindings(void) {
     bind_defaults();
     load_ports();
@@ -488,20 +525,25 @@ static void load_bindings(void) {
     if (!f) return;
     char line[512];
     while (fgets(line,sizeof line,f)) {
-        const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
+        const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4), mouse=!strncmp(line,"mouse.",6);
         char *eq=strchr(line,'=');
-        if ((!keyboard && !pad) || !eq) continue;
+        if ((!keyboard && !pad && !mouse) || !eq) continue;
         *eq=0;
+        const char *input_name=line+(mouse ? 6 : 4);
         int input=-1;
-        for (int i=0;i<IN_COUNT;++i) if (!strcmp(line+4,input_names[i])) input=i;
-        if (input<0 || (pad && input>=IN_MOVE_UP)) { printf("Runtime: controls: unknown input %s\n",line); continue; }
+        for (int i=0;i<IN_COUNT;++i) if (!strcmp(input_name,input_names[i])) input=i;
+        if (input<0 || ((pad || mouse) && input>=IN_MOVE_UP)) { printf("Runtime: controls: unknown input %s\n",line); continue; }
         Binding *b=&bindings[input];
-        if (keyboard) b->key_count=0; else b->pad_count=0;
+        if (keyboard) b->key_count=0; else if (mouse) b->mouse=0; else b->pad_count=0;
         for (char *name=strtok(eq+1,",\r\n"); name; name=strtok(NULL,",\r\n")) {
             while (*name==' ') ++name;
             for (char *end=name+strlen(name); end>name && end[-1]==' ';) *--end=0;
             if (!*name) continue;
-            if (keyboard) {
+            if (mouse) {
+                const uint32_t button=mouse_button_from_name(name);
+                if (!button) printf("Runtime: controls: unknown mouse button \"%s\" for %s\n",name,input_name);
+                else b->mouse|=button;
+            } else if (keyboard) {
                 const SDL_Scancode s=SDL_GetScancodeFromName(name);
                 if (s==SDL_SCANCODE_UNKNOWN) printf("Runtime: controls: unknown key \"%s\" for %s\n",name,line+4);
                 else if (b->key_count<MAX_BIND) b->keys[b->key_count++]=s;
@@ -548,6 +590,19 @@ static void apply_keyboard(PadData *d, const bool *k) {
     d->right_y=key_axis(d->right_y,key_down(k,IN_LOOK_UP),key_down(k,IN_LOOK_DOWN));
 }
 
+/* Mouse buttons are aliases of PS4 actions, exclusively on player 1 in keyboard_mouse mode.
+ * Movement stays on WASD; mouse movement never changes either stick. */
+static void apply_mouse(PadData *d, uint32_t buttons) {
+    if (buttons & BBGPU_PC_INPUT_INACTIVE) return;
+    for (int i=IN_CROSS;i<=IN_RIGHT;++i) {
+        if (!(buttons & bindings[i].mouse)) continue;
+        if (i==IN_TOUCHPAD || i==IN_TOUCHPAD_RIGHT) touch_click(d,i==IN_TOUCHPAD_RIGHT);
+        else d->buttons|=input_buttons[i];
+        if (i==IN_L2) d->l2=255;
+        if (i==IN_R2) d->r2=255;
+    }
+}
+
 static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *cal) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -556,6 +611,10 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
     d->timestamp=now_us();
     if (!bindings_ready) { load_bindings(); bindings_ready=1; }
     if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
+    const int pc_only=keyboard && keyboard_mouse_only();
+    if (pc_only) g=NULL;
+    const uint32_t mouse=pc_only ? bbgpu_pc_input_state() : 0;
+    if (pc_only && (mouse & BBGPU_PC_INPUT_INACTIVE)) return;
     const bool *k=keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (g) {
         int touch_right=0;
@@ -590,6 +649,7 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         if (touch_right) touch_click(d,1);
     }
     if (k) apply_keyboard(d,k);
+    if (pc_only) apply_mouse(d,mouse);
 }
 static void sample_host(PadData *d) {
     SDL_Gamepad *g=current_gamepad();

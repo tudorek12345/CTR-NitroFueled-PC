@@ -116,6 +116,14 @@ def ini_value(path, key):
     return None
 
 
+def native_environment(base, config):
+    """Apply the conservative GPU path per launch, without leaking overrides into a restart."""
+    result = dict(base)
+    if ini_value(config, 'gpu_safe_mode') == '1':
+        result.update(BB_DRAW_PIPE='0', BB_PREP_WORKERS='0', BB_HONEST_LABELS='1')
+    return result
+
+
 # bbport.ini render_res (or a DLSS quality with temporal=dlss) picks the game's rendering path
 # (scripts/patches.py render_plan, docs/sacredfire/13-resolution.md): above 1080 and below it the
 # PS4 Pro path; the larger GPU heap of native 4K also takes more than the Pro's 5568 MiB of direct
@@ -398,7 +406,10 @@ def main():
             else:
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            launch_env = native_environment(env, config)
+            if ini_value(config, 'gpu_safe_mode') == '1':
+                say('Experimental GPU synchronization: draw pipeline and preparation workers off; fences wait for GPU completion')
+            process = subprocess.Popen(command, env=launch_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, creationflags=no_console())
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
             reader.start()
